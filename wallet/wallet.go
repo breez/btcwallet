@@ -23,8 +23,6 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/davecgh/go-spew/spew"
-
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
@@ -32,7 +30,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/davecgh/go-spew/spew"
 )
 
 const (
@@ -2663,6 +2663,14 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		if err != nil {
 			return err
 		}
+
+		// We'll only update our birthday with the new one if it is
+		// before our current one. Otherwise, we won't rescan for
+		// potentially relevant chain events that occurred between them.
+		if newBirthday.After(w.Manager.Birthday()) {
+			return nil
+		}
+
 		return w.Manager.SetBirthday(addrmgrNs, newBirthday)
 	})
 	if err != nil {
@@ -3098,9 +3106,9 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 }
 
 // SendOutputs creates and sends payment transactions. It returns the
-// transaction hash upon success.
+// transaction upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32, satPerKb btcutil.Amount) (*chainhash.Hash, error) {
+	minconf int32, satPerKb btcutil.Amount) (*wire.MsgTx, error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
@@ -3119,7 +3127,17 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 		return nil, err
 	}
 
-	return w.publishTransaction(createdTx.Tx)
+	txHash, err := w.publishTransaction(createdTx.Tx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sanity check on the returned tx hash.
+	if *txHash != createdTx.Tx.TxHash() {
+		return nil, errors.New("tx hash mismatch")
+	}
+
+	return createdTx.Tx, nil
 }
 
 // SignatureError records the underlying error when validating a transaction
@@ -3394,58 +3412,49 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Par
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	params *chaincfg.Params, recoveryWindow uint32) (*Wallet, error) {
 
-	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
-		waddrmgrBucket := tx.ReadBucket(waddrmgrNamespaceKey)
-		if waddrmgrBucket == nil {
+	var (
+		addrMgr *waddrmgr.Manager
+		txMgr   *wtxmgr.Store
+	)
+
+	// Before attempting to open the wallet, we'll check if there are any
+	// database upgrades for us to proceed. We'll also create our references
+	// to the address and transaction managers, as they are backed by the
+	// database.
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		addrMgrBucket := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		if addrMgrBucket == nil {
 			return errors.New("missing address manager namespace")
 		}
-		wtxmgrBucket := tx.ReadBucket(wtxmgrNamespaceKey)
-		if wtxmgrBucket == nil {
+		txMgrBucket := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txMgrBucket == nil {
 			return errors.New("missing transaction manager namespace")
 		}
+
+		addrMgrUpgrader := waddrmgr.NewMigrationManager(addrMgrBucket)
+		txMgrUpgrader := wtxmgr.NewMigrationManager(txMgrBucket)
+		err := migration.Upgrade(txMgrUpgrader, addrMgrUpgrader)
+		if err != nil {
+			return err
+		}
+
+		addrMgr, err = waddrmgr.Open(addrMgrBucket, pubPass, params)
+		if err != nil {
+			return err
+		}
+		txMgr, err = wtxmgr.Open(txMgrBucket, params)
+		if err != nil {
+			return err
+		}
+
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Perform upgrades as necessary.  Each upgrade is done under its own
-	// transaction, which is managed by each package itself, so the entire
-	// DB is passed instead of passing already opened write transaction.
-	//
-	// This will need to change later when upgrades in one package depend on
-	// data in another (such as removing chain synchronization from address
-	// manager).
-	err = waddrmgr.DoUpgrades(db, waddrmgrNamespaceKey, pubPass, params, cbs)
-	if err != nil {
-		return nil, err
-	}
-	err = wtxmgr.DoUpgrades(db, wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-
-	// Open database abstraction instances
-	var (
-		addrMgr *waddrmgr.Manager
-		txMgr   *wtxmgr.Store
-	)
-	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-		var err error
-		addrMgr, err = waddrmgr.Open(addrmgrNs, pubPass, params)
-		if err != nil {
-			return err
-		}
-		txMgr, err = wtxmgr.Open(txmgrNs, params)
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
+
 	w := &Wallet{
 		publicPassphrase:    pubPass,
 		db:                  db,
@@ -3468,9 +3477,11 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		chainParams:         params,
 		quit:                make(chan struct{}),
 	}
+
 	w.NtfnServer = newNotificationServer(w)
 	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
+
 	return w, nil
 }
