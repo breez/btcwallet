@@ -337,9 +337,10 @@ func (w *Wallet) onClientConnected() {
 }
 
 // syncWithChain brings the wallet up to date with the current chain server
-// connection.  It creates a rescan request and blocks until the rescan has
-// finished.
-func (w *Wallet) syncWithChain() error {
+// connection. It creates a rescan request and blocks until the rescan has
+// finished. The birthday block can be passed in, if set, to ensure we can
+// properly detect if it gets rolled back.
+func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return err
@@ -369,12 +370,6 @@ func (w *Wallet) syncWithChain() error {
 
 	isRecovery := w.recoveryWindow > 0
 	birthday := w.Manager.Birthday()
-
-	// If an initial sync is attempted, we will try and find the block stamp
-	// of the first block past our birthday. This will be fed into the
-	// rescan to ensure we catch transactions that are sent while performing
-	// the initial sync.
-	var birthdayStamp *waddrmgr.BlockStamp
 
 	// TODO(jrick): How should this handle a synced height earlier than
 	// the chain server best block?
@@ -514,6 +509,19 @@ func (w *Wallet) syncWithChain() error {
 						Height:    height,
 						Hash:      *hash,
 						Timestamp: timestamp,
+					}
+
+					log.Debugf("Found birthday block: "+
+						"height=%d, hash=%v",
+						birthdayStamp.Height,
+						birthdayStamp.Hash)
+
+					err := w.Manager.SetBirthdayBlock(
+						ns, *birthdayStamp, true,
+					)
+					if err != nil {
+						tx.Rollback()
+						return err
 					}
 				}
 
@@ -664,8 +672,24 @@ func (w *Wallet) syncWithChain() error {
 	// If a birthday stamp was found during the initial sync and the
 	// rollback causes us to revert it, update the birthday stamp so that it
 	// points at the new tip.
+	birthdayRollback := false
 	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
 		birthdayStamp = &rollbackStamp
+		birthdayRollback = true
+
+		log.Debugf("Found new birthday block after rollback: "+
+			"height=%d, hash=%v", birthdayStamp.Height,
+			birthdayStamp.Hash)
+
+		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			return w.Manager.SetBirthdayBlock(
+				ns, *birthdayStamp, true,
+			)
+		})
+		if err != nil {
+			return nil
+		}
 	}
 
 	// Request notifications for connected and disconnected blocks.
@@ -676,12 +700,20 @@ func (w *Wallet) syncWithChain() error {
 	// as well.  I am leaning towards allowing off all rpcclient
 	// notification re-registrations, in which case the code here should be
 	// left as is.
-	err = chainClient.NotifyBlocks()
-	if err != nil {
+	if err := chainClient.NotifyBlocks(); err != nil {
 		return err
 	}
 
-	return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	// If this was our initial sync, we're recovering from our seed, or our
+	// birthday was rolled back due to a chain reorg, we'll dispatch a
+	// rescan from our birthday block to ensure we detect all relevant
+	// on-chain events from this point.
+	if isInitialSync || isRecovery || birthdayRollback {
+		return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	}
+
+	// Otherwise, we'll rescan from tip.
+	return w.rescanWithTarget(addrs, unspent, nil)
 }
 
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
@@ -2622,6 +2654,9 @@ func (w *Wallet) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 
 // ImportPrivateKey imports a private key to the wallet and writes the new
 // wallet to disk.
+//
+// NOTE: If a block stamp is not provided, then the wallet's birthday will be
+// set to the genesis block of the corresponding chain.
 func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	bs *waddrmgr.BlockStamp, rescan bool) (string, error) {
 
@@ -2632,18 +2667,18 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 
 	// The starting block for the key is the genesis block unless otherwise
 	// specified.
-	var newBirthday time.Time
 	if bs == nil {
 		bs = &waddrmgr.BlockStamp{
-			Hash:   *w.chainParams.GenesisHash,
-			Height: 0,
+			Hash:      *w.chainParams.GenesisHash,
+			Height:    0,
+			Timestamp: w.chainParams.GenesisBlock.Header.Timestamp,
 		}
-	} else {
+	} else if bs.Timestamp.IsZero() {
 		// Only update the new birthday time from default value if we
 		// actually have timestamp info in the header.
 		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
 		if err == nil {
-			newBirthday = header.Timestamp
+			bs.Timestamp = header.Timestamp
 		}
 	}
 
@@ -2665,13 +2700,26 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		}
 
 		// We'll only update our birthday with the new one if it is
-		// before our current one. Otherwise, we won't rescan for
-		// potentially relevant chain events that occurred between them.
-		if newBirthday.After(w.Manager.Birthday()) {
+		// before our current one. Otherwise, if we do, we can
+		// potentially miss detecting relevant chain events that
+		// occurred between them while rescanning.
+		birthdayBlock, _, err := w.Manager.BirthdayBlock(addrmgrNs)
+		if err != nil {
+			return err
+		}
+		if bs.Height >= birthdayBlock.Height {
 			return nil
 		}
 
-		return w.Manager.SetBirthday(addrmgrNs, newBirthday)
+		err = w.Manager.SetBirthday(addrmgrNs, bs.Timestamp)
+		if err != nil {
+			return err
+		}
+
+		// To ensure this birthday block is correct, we'll mark it as
+		// unverified to prompt a sanity check at the next restart to
+		// ensure it is correct as it was provided by the caller.
+		return w.Manager.SetBirthdayBlock(addrmgrNs, *bs, false)
 	})
 	if err != nil {
 		return "", err
@@ -2774,6 +2822,15 @@ func (w *Wallet) resendUnminedTxs() {
 	for _, tx := range txs {
 		resp, err := chainClient.SendRawTransaction(tx, false)
 		if err != nil {
+			// If the transaction has already been accepted into the
+			// mempool, we can continue without logging the error.
+			switch {
+			case strings.Contains(err.Error(), "already have transaction"):
+				fallthrough
+			case strings.Contains(err.Error(), "txn-already-known"):
+				continue
+			}
+
 			log.Debugf("Could not resend transaction %v: %v",
 				tx.TxHash(), err)
 
@@ -2805,9 +2862,12 @@ func (w *Wallet) resendUnminedTxs() {
 
 			// As the transaction was rejected, we'll attempt to
 			// remove the unmined transaction all together.
-			// Otherwise, we'll keep attempting to rebroadcast
-			// this, and we may be computing our balance
-			// incorrectly if this tx credits or debits to us.
+			// Otherwise, we'll keep attempting to rebroadcast this,
+			// and we may be computing our balance incorrectly if
+			// this transaction credits or debits to us.
+			//
+			// TODO(wilmer): if already confirmed, move to mined
+			// bucket - need to determine the confirmation block.
 			err := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 				txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 
@@ -2940,6 +3000,11 @@ func (w *Wallet) NewChangeAddress(account uint32,
 	return addr, nil
 }
 
+// newChangeAddress returns a new change address for the wallet.
+//
+// NOTE: This method requires the caller to use the backend's NotifyReceived
+// method in order to detect when an on-chain transaction pays to the address
+// being created.
 func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
 	account uint32) (btcutil.Address, error) {
 
@@ -3293,7 +3358,7 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 // from the database (along with cleaning up all inputs used, and outputs
 // created) if the transaction is rejected by the back end.
 func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
-	server, err := w.requireChainClient()
+	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
 	}
@@ -3313,7 +3378,33 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		return nil, err
 	}
 
-	txid, err := server.SendRawTransaction(tx, false)
+	// We'll also ask to be notified of the transaction once it confirms
+	// on-chain. This is done outside of the database transaction to prevent
+	// backend interaction within it.
+	//
+	// NOTE: In some cases, it's possible that the transaction to be
+	// broadcast is not directly relevant to the user's wallet, e.g.,
+	// multisig. In either case, we'll still ask to be notified of when it
+	// confirms to maintain consistency.
+	//
+	// TODO(wilmer): import script as external if the address does not
+	// belong to the wallet to handle confs during restarts?
+	for _, txOut := range tx.TxOut {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			txOut.PkScript, w.chainParams,
+		)
+		if err != nil {
+			// Non-standard outputs can safely be skipped because
+			// they're not supported by the wallet.
+			continue
+		}
+
+		if err := chainClient.NotifyReceived(addrs); err != nil {
+			return nil, err
+		}
+	}
+
+	txid, err := chainClient.SendRawTransaction(tx, false)
 	switch {
 	case err == nil:
 		return txid, nil
