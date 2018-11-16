@@ -100,7 +100,7 @@ func (w *Wallet) handleChainNotifications() {
 					panic(err)
 				}
 
-				go w.onClientConnected(birthdayBlock)
+				w.onClientConnected(birthdayBlock)
 			case chain.BlockConnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.connectBlock(tx, wtxmgr.BlockMeta(n))

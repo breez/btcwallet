@@ -225,6 +225,7 @@ func (l *Loader) LoadedWallet() (*Wallet, bool) {
 // CreateNewWallet or LoadExistingWallet.  The Loader may be reused if this
 // function returns without error.
 func (l *Loader) UnloadWallet() error {
+	log.Infof("******** UnloadWallet")
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
@@ -234,7 +235,9 @@ func (l *Loader) UnloadWallet() error {
 
 	l.wallet.Stop()
 	l.wallet.WaitForShutdown()
+	log.Infof("******** Before db.close")
 	err := l.db.Close()
+	log.Infof("******** After db.Close")
 	if err != nil {
 		return err
 	}
