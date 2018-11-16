@@ -321,15 +321,15 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 	return addrs, unspent, err
 }
 
-func (w *Wallet) onClientConnected() {
+func (w *Wallet) onClientConnected(birthdayStamp *waddrmgr.BlockStamp) {
 	w.wg.Add(1)
+	// At the moment there is no recourse if the rescan fails for
+	// some reason, however, the wallet will not be marked synced
+	// and many methods will error early since the wallet is known
+	// to be out of date.
 	go func() {
-		// At the moment there is no recourse if the rescan fails for
-		// some reason, however, the wallet will not be marked synced
-		// and many methods will error early since the wallet is known
-		// to be out of date.
 		defer w.wg.Done()
-		err := w.syncWithChain()
+		err := w.syncWithChain(birthdayStamp)
 		if err != nil && !w.ShuttingDown() {
 			log.Warnf("Unable to synchronize wallet to chain: %v", err)
 		}
