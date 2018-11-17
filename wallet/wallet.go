@@ -264,7 +264,7 @@ func (w *Wallet) WaitForShutdown() {
 
 	//We can close the db now that we know all go routines have exited and
 	//we are sure no further attempts to write to the wallet db will be done.
-	//w.db.Close()
+	w.db.Close()
 }
 
 // SynchronizingToNetwork returns whether the wallet is currently synchronizing
