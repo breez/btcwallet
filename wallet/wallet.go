@@ -366,7 +366,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// We'll mark this as our first sync if we don't have any unspent
 	// outputs as known by the wallet. This'll allow us to skip a full
 	// rescan at this height, and instead wait for the backend to catch up.
-	isInitialSync := len(unspent) == 0
+	isInitialSync := birthdayStamp == nil
 
 	isRecovery := w.recoveryWindow > 0
 	birthday := w.Manager.Birthday()
@@ -523,6 +523,15 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 						tx.Rollback()
 						return err
 					}
+					err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+						Hash:      *hash,
+						Height:    height,
+						Timestamp: timestamp,
+					})
+					if err != nil {
+						tx.Rollback()
+						return err
+					}
 				}
 
 				// If we are in recovery mode and the check
@@ -535,14 +544,16 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 				}
 			}
 
-			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
-				Hash:      *hash,
-				Height:    height,
-				Timestamp: timestamp,
-			})
-			if err != nil {
-				tx.Rollback()
-				return err
+			if birthdayStamp == nil {
+				err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+					Hash:      *hash,
+					Height:    height,
+					Timestamp: timestamp,
+				})
+				if err != nil {
+					tx.Rollback()
+					return err
+				}
 			}
 
 			// If we are in recovery mode, attempt a recovery on
@@ -672,10 +683,8 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// If a birthday stamp was found during the initial sync and the
 	// rollback causes us to revert it, update the birthday stamp so that it
 	// points at the new tip.
-	birthdayRollback := false
 	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
 		birthdayStamp = &rollbackStamp
-		birthdayRollback = true
 
 		log.Debugf("Found new birthday block after rollback: "+
 			"height=%d, hash=%v", birthdayStamp.Height,
@@ -683,6 +692,15 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 
 		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+				Hash:      birthdayStamp.Hash,
+				Height:    birthdayStamp.Height,
+				Timestamp: birthdayStamp.Timestamp,
+			})
+			if err != nil {
+				tx.Rollback()
+				return err
+			}
 			return w.Manager.SetBirthdayBlock(
 				ns, *birthdayStamp, true,
 			)
@@ -704,15 +722,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		return err
 	}
 
-	// If this was our initial sync, we're recovering from our seed, or our
-	// birthday was rolled back due to a chain reorg, we'll dispatch a
-	// rescan from our birthday block to ensure we detect all relevant
-	// on-chain events from this point.
-	if isInitialSync || isRecovery || birthdayRollback {
-		return w.rescanWithTarget(addrs, unspent, birthdayStamp)
-	}
-
-	// Otherwise, we'll rescan from tip.
+	// Trigger rescan from the last sync point.
 	return w.rescanWithTarget(addrs, unspent, nil)
 }
 
