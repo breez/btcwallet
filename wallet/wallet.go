@@ -261,6 +261,11 @@ func (w *Wallet) WaitForShutdown() {
 	}
 	w.chainClientLock.Unlock()
 	w.wg.Wait()
+
+	//We can close the db now that we know all go routines have exited and
+	//we are sure no further attempts to write to the wallet db will be done.
+	w.db.Close()
+
 }
 
 // SynchronizingToNetwork returns whether the wallet is currently synchronizing
@@ -315,6 +320,21 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 	}
 	unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
 	return addrs, unspent, err
+}
+
+func (w *Wallet) onClientConnected(birthdayStamp *waddrmgr.BlockStamp) {
+	w.wg.Add(1)
+	// At the moment there is no recourse if the rescan fails for
+	// some reason, however, the wallet will not be marked synced
+	// and many methods will error early since the wallet is known
+	// to be out of date.
+	go func() {
+		defer w.wg.Done()
+		err := w.syncWithChain(birthdayStamp)
+		if err != nil && !w.ShuttingDown() {
+			log.Warnf("Unable to synchronize wallet to chain: %v", err)
+		}
+	}()
 }
 
 // syncWithChain brings the wallet up to date with the current chain server
