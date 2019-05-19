@@ -36,6 +36,8 @@ func (w *Wallet) handleChainNotifications() {
 	}
 
 	sync := func(w *Wallet, birthdayStamp *waddrmgr.BlockStamp) {
+		defer w.wg.Done()
+
 		// At the moment there is no recourse if the rescan fails for
 		// some reason, however, the wallet will not be marked synced
 		// and many methods will error early since the wallet is known
@@ -126,6 +128,7 @@ func (w *Wallet) handleChainNotifications() {
 					panic(err)
 				}
 
+				w.wg.Add(1)
 				go sync(w, birthdayBlock)
 			case chain.BlockConnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
