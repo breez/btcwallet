@@ -779,6 +779,20 @@ func (a *witnessScriptAddress) Script() ([]byte, error) {
 	return a.unlock(a.manager.rootManager.cryptoKeyScript)
 }
 
+// Derivationinfo contains the information required to derive the key that
+// backs the address via traditional methods from the HD root. For imported
+// keys, the first value will be set to false to indicate that we don't know
+// exactly how the key was derived.
+//
+// This is part of the ManagedPubKeyAddress interface implementation.
+func (a *witnessScriptAddress) DerivationInfo() (KeyScope, DerivationPath, bool) {
+	var (
+		scope KeyScope
+		path  DerivationPath
+	)
+	return scope, path, false
+}
+
 // newWitnessScriptAddress initializes and returns a new pay-to-script-hash address.
 func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
 	scriptEncrypted []byte) (*witnessScriptAddress, error) {
