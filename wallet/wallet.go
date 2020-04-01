@@ -33,6 +33,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 const (
@@ -607,6 +608,10 @@ func locateBirthdayBlock(chainClient chainConn,
 		}
 		header, err := chainClient.GetBlockHeader(hash)
 		if err != nil {
+			if err == headerfs.ErrHashNotFound {
+				left = mid
+				continue
+			}
 			return nil, err
 		}
 
