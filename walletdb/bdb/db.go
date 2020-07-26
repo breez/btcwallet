@@ -384,7 +384,7 @@ func openDB(dbPath string, noFreelistSync bool, create bool) (walletdb.DB, error
 	return (*db)(boltDB), convertErr(err)
 }
 
-func UnderlineDB(d walletdb.DB) (*bbolt.db, error) {
+func UnderlineDB(d walletdb.DB) (*bbolt.DB, error) {
 	bdb, ok := d.(*db)
 	if !ok {
 		return nil, errors.New("not a bolt db")
