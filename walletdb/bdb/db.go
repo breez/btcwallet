@@ -5,6 +5,7 @@
 package bdb
 
 import (
+	"errors"
 	"io"
 	"os"
 
@@ -381,4 +382,12 @@ func openDB(dbPath string, noFreelistSync bool, create bool) (walletdb.DB, error
 
 	boltDB, err := bbolt.Open(dbPath, 0600, options)
 	return (*db)(boltDB), convertErr(err)
+}
+
+func UnderlineDB(d walletdb.DB) (*bbolt.DB, error) {
+	bdb, ok := d.(*db)
+	if !ok {
+		return nil, errors.New("not a bolt db")
+	}
+	return (*bbolt.DB)(bdb), nil
 }
