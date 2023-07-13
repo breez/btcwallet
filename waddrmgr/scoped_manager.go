@@ -845,6 +845,12 @@ func (s *ScopedKeyManager) scriptAddressRowToManaged(
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
+	if len(scriptHash) == 32 {
+		return newWitnessScriptAddress(s, row.account, scriptHash,
+			row.encryptedScript, 0, false,
+		)
+	}
+
 	return newScriptAddress(s, row.account, scriptHash, row.encryptedScript)
 }
 
