@@ -959,6 +959,12 @@ func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
 		address = pka.AddressPubKeyHash()
 	}
 
+	// First check the root manager's lock state without holding our lock
+	// to avoid lock ordering issues
+	if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
+		return nil, managerError(ErrLocked, errLocked, nil)
+	}
+
 	// Return the address from cache if it's available.
 	//
 	// NOTE: Not using a defer on the lock here since a write lock is
@@ -970,10 +976,16 @@ func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
 	}
 	s.mtx.RUnlock()
 
+	// Address not in cache, so we need to load it
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	// Attempt to load the address from the database.
+	// Check cache again in case another goroutine added it
+	if ma, ok := s.addrs[addrKey(address.ScriptAddress())]; ok {
+		return ma, nil
+	}
+
+	// Attempt to load the address from the database
 	return s.loadAndCacheAddress(ns, address)
 }
 
