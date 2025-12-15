@@ -317,6 +317,15 @@ type Interface interface {
 	// script for a given UTXO.
 	ScriptForOutput(output *wire.TxOut) (waddrmgr.ManagedPubKeyAddress,
 		[]byte, []byte, error)
+
+	// GetUtxosFromHeight returns the list of utxos into a specific address from a start height
+	GetUtxosFromHeight(net *chaincfg.Params, start int32, address string) ([]Utxo, error)
+}
+
+type Utxo struct {
+	Value       btcutil.Amount
+	BlockHeight int32
+	wire.OutPoint
 }
 
 // A compile time check to ensure that Wallet implements the interface.
